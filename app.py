@@ -1,6 +1,6 @@
 """
 Python Web Application (Flask) demonstrating Security & Rate Limiting Mechanisms:
-1. Explicit Login Flow (Username 404, Lockout 429, Password 401/200)
+1. Secure Login Flow (Generic 401 Unauthorized, Constant-Time Logic preventing Username Enumeration & Timing Attacks)
 2. Account-based Brute Force Lockout (Prevents IP rotation / spraying attacks)
 3. Password Complexity Enforcement (Min 8 chars, UPPER/lower/number/special, no username, no DOB)
 4. Session & JWT Authentication
@@ -415,6 +415,7 @@ HOME_PAGE = """
         <li><strong>Exponential Backoff:</strong> Delay doubles after each failed attempt ($2^n$ seconds: 2s, 4s, 8s, 16s... max 64s).</li>
         <li><strong>Dynamic CAPTCHA:</strong> Required after 2 failed attempts or on high-frequency requests.</li>
         <li><strong>UI UX Blocking:</strong> Submit buttons automatically lock & display live countdown timers during backoff/lockout.</li>
+        <li><strong>Timing Side-Channel Test:</strong> Live benchmark comparing <code>checkusername-return</code> (Vulnerable 404) vs <code>checkusername-checkpassword-return</code> (Secure 401).</li>
     </ul>
     <p><em>Demo Accounts:</em> <code>admin / Admin@2026!</code>, <code>user / User@2026!</code></p>
 </div>
@@ -474,6 +475,37 @@ HOME_PAGE = """
     <input type="text" id="val_dob" value="1998-10-25" placeholder="Date of birth (YYYY-MM-DD)"><br>
     <button onclick="testPasswordVal()">Validate Password Complexity</button>
     <pre id="val_output">// Click button above to check password requirements...</pre>
+</div>
+
+<!-- TIMING SIDE-CHANNEL BENCHMARK DEMO -->
+<div class="box">
+    <h3>⏱️ 4. Timing Side-Channel Benchmark (checkusername-return vs checkusername-checkpassword-return)</h3>
+    <p>Compares response times and HTTP status codes between 2 login mechanisms to detect Username Enumeration vulnerabilities.</p>
+    
+    <input type="text" id="timing_user" value="nonexistent_user" placeholder="Try username (e.g. admin or nonexistent_user)"><br>
+    <input type="password" id="timing_pass" value="wrong_password" placeholder="Password"><br>
+    
+    <button onclick="testTimingDifference()" class="btn-warning">⏱️ Run Timing Benchmark Test</button>
+    
+    <div id="timing_results" style="display:none; margin-top:15px;">
+        <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+            <div style="flex:1; background:#f8d7da; border:1px solid #f5c2c7; border-radius:8px; padding:12px;">
+                <h4 style="margin-top:0; color:#842029;">⚠️ Flow A: checkusername-return (Vulnerable 404)</h4>
+                <p style="margin:4px 0;"><strong>HTTP Status:</strong> <span id="flow_a_code">-</span></p>
+                <p style="margin:4px 0;"><strong>Execution Time:</strong> <span id="flow_a_time" style="font-size:18px; font-weight:bold; color:#dc3545;">- ms</span></p>
+                <p style="margin:4px 0; font-size:12px;"><strong>Message:</strong> <span id="flow_a_msg">-</span></p>
+            </div>
+            <div style="flex:1; background:#d1e7dd; border:1px solid #badbcc; border-radius:8px; padding:12px;">
+                <h4 style="margin-top:0; color:#0f5132;">🛡️ Flow B: checkusername-checkpassword-return (Secure 401)</h4>
+                <p style="margin:4px 0;"><strong>HTTP Status:</strong> <span id="flow_b_code">-</span></p>
+                <p style="margin:4px 0;"><strong>Execution Time:</strong> <span id="flow_b_time" style="font-size:18px; font-weight:bold; color:#198754;">- ms</span></p>
+                <p style="margin:4px 0; font-size:12px;"><strong>Message:</strong> <span id="flow_b_msg">-</span></p>
+            </div>
+        </div>
+        <div class="warning" id="timing_analysis">
+            // Timing Side-Channel Analysis results will appear here...
+        </div>
+    </div>
 </div>
 
 <script>
@@ -653,6 +685,38 @@ async function testPasswordVal() {
         out.textContent = "Error: " + err;
     }
 }
+
+async function testTimingDifference() {
+    const u = document.getElementById("timing_user").value;
+    const p = document.getElementById("timing_pass").value;
+    const resContainer = document.getElementById("timing_results");
+    
+    try {
+        const res = await fetch("/api/test-timing", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: u, password: p })
+        });
+        const data = await res.json();
+        
+        resContainer.style.display = "block";
+        document.getElementById("flow_a_code").textContent = data.flow_a_vulnerable.status_code;
+        document.getElementById("flow_a_time").textContent = data.flow_a_vulnerable.execution_time_ms + " ms";
+        document.getElementById("flow_a_msg").textContent = data.flow_a_vulnerable.message;
+        
+        document.getElementById("flow_b_code").textContent = data.flow_b_secure.status_code;
+        document.getElementById("flow_b_time").textContent = data.flow_b_secure.execution_time_ms + " ms";
+        document.getElementById("flow_b_msg").textContent = data.flow_b_secure.message;
+        
+        document.getElementById("timing_analysis").innerHTML = 
+            `<strong>📊 Timing Side-Channel Analysis Results:</strong><br>${data.analysis}<br>` +
+            `<em>Username '<code>${data.username_tested}</code>' ${data.username_exists ? 'EXISTS' : 'does NOT exist'} in the USERS dictionary.<br>` +
+            `• Flow A (Vulnerable) returns early if username is wrong (Status 404), creating a latency delta Δt.<br>` +
+            `• Flow B (Secure) executes uniform processing steps (Status 401), eliminating Username Enumeration.</em>`;
+    } catch (err) {
+        alert("Error running Timing Benchmark: " + err);
+    }
+}
 </script>
 </body></html>
 """
@@ -820,24 +884,19 @@ def login():
                 LOGIN_PAGE, style=BASE_STYLE, error=error, lock_seconds=lb_res["wait_seconds"], last_username=username
             ), 429
 
-        # Step 1: Check Username Existence (404 Not Found)
-        if username not in USERS:
-            error = f"❌ 404 Not Found: Username '{username}' does not exist!"
-            return render_template_string(LOGIN_PAGE, style=BASE_STYLE, error=error), 404
-
-        # Step 2: Check Brute Force Lockout (429 Too Many Requests)
+        # Step 1: Check Brute Force Lockout (429 Too Many Requests)
         is_locked, remaining_seconds = check_brute_force_lockout(identifier)
         if is_locked:
-            error = f"⛔ 429 Too Many Requests: Account '{username}' is locked due to too many failed attempts ({MAX_FAILED_ATTEMPTS}). Try again in {remaining_seconds} seconds."
+            error = f"⛔ 429 Too Many Requests: Account is locked due to too many failed attempts ({MAX_FAILED_ATTEMPTS}). Try again in {remaining_seconds} seconds."
             return render_template_string(LOGIN_PAGE, style=BASE_STYLE, error=error, lock_seconds=remaining_seconds, last_username=username), 429
 
-        # Step 3: Check Exponential Backoff Cooldown
+        # Step 2: Check Exponential Backoff Cooldown
         in_backoff, backoff_remaining = check_exponential_backoff_cooldown(identifier)
         if in_backoff:
             error = f"⏳ Exponential Backoff Cooldown: Please wait {backoff_remaining} seconds before trying again."
             return render_template_string(LOGIN_PAGE, style=BASE_STYLE, error=error, lock_seconds=backoff_remaining, last_username=username), 429
 
-        # Step 4: Check CAPTCHA if required for this account
+        # Step 3: Check CAPTCHA if required for this account
         record = FAILED_ATTEMPTS.get(identifier, {})
         fail_count = record.get("count", 0)
         
@@ -862,8 +921,11 @@ def login():
                     lock_seconds=backoff_sec, last_username=username
                 ), 400
 
-        # Step 5: Check Password Match using ==
-        if USERS[username] == password:
+        # Step 4: Check Username & Password Match (Unified check to prevent timing attacks)
+        user_exists = username in USERS
+        password_correct = user_exists and USERS[username] == password
+
+        if password_correct:
             reset_failed_attempts(identifier)
             session.permanent = True
             session["username"] = username
@@ -871,11 +933,11 @@ def login():
         else:
             attempts, is_now_locked, lock_sec, backoff_sec = record_failed_attempt(identifier)
             if is_now_locked:
-                error = f"⛔ 429 Too Many Requests: Failed password attempt ({attempts}/{MAX_FAILED_ATTEMPTS}). Account '{username}' is locked for {lock_sec} seconds."
+                error = f"⛔ 429 Too Many Requests: Failed login attempt ({attempts}/{MAX_FAILED_ATTEMPTS}). Account is locked for {lock_sec} seconds."
                 return render_template_string(LOGIN_PAGE, style=BASE_STYLE, error=error, lock_seconds=lock_sec, last_username=username), 429
             else:
                 remaining_tries = MAX_FAILED_ATTEMPTS - attempts
-                error = f"❌ 401 Unauthorized: Incorrect password! ({attempts}/{MAX_FAILED_ATTEMPTS} failed attempts). Exponential Backoff: {backoff_sec}s delay enforced."
+                error = f"❌ 401 Unauthorized: Invalid username or password! ({attempts}/{MAX_FAILED_ATTEMPTS} failed attempts). Exponential Backoff: {backoff_sec}s delay enforced."
                 
                 # Check if CAPTCHA will be required for next attempt
                 if attempts >= CAPTCHA_REQUIRE_THRESHOLD:
@@ -905,11 +967,10 @@ def api_login():
     """
     JSON API Login Endpoint with Leaky Bucket, Backoff, Lockout & CAPTCHA:
     - Step 0: Check Leaky Bucket rate limit -> 429
-    - Step 1: Check username existence -> 404
-    - Step 2: Check account lockout status -> 429
-    - Step 3: Check Exponential Backoff cooldown -> 429
-    - Step 4: Check CAPTCHA (if required) -> 400
-    - Step 5: Check password match -> 200 + JWT (or 401)
+    - Step 1: Check account lockout status -> 429
+    - Step 2: Check Exponential Backoff cooldown -> 429
+    - Step 3: Check CAPTCHA (if required) -> 400
+    - Step 4: Check username & password match (unified 401 error) -> 200 + JWT (or 401)
     """
     client_ip = request.remote_addr or "127.0.0.1"
 
@@ -938,25 +999,17 @@ def api_login():
 
     identifier = get_account_identifier(username)
 
-    # Step 1: Check Username Existence (404 Not Found)
-    if username not in USERS:
-        return jsonify({
-            "error": "Not Found",
-            "status_code": 404,
-            "message": f"Username '{username}' does not exist."
-        }), 404
-
-    # Step 2: Check Account Lockout Status (429 Too Many Requests)
+    # Step 1: Check Account Lockout Status (429 Too Many Requests)
     is_locked, remaining_seconds = check_brute_force_lockout(identifier)
     if is_locked:
         return jsonify({
             "error": "Too Many Requests",
             "status_code": 429,
-            "message": f"Account '{username}' is locked due to too many failed attempts ({MAX_FAILED_ATTEMPTS}). Try again in {remaining_seconds} seconds.",
+            "message": f"Account is locked due to too many failed attempts ({MAX_FAILED_ATTEMPTS}). Try again in {remaining_seconds} seconds.",
             "retry_after_seconds": remaining_seconds
         }), 429
 
-    # Step 3: Check Exponential Backoff Cooldown
+    # Step 2: Check Exponential Backoff Cooldown
     in_backoff, backoff_remaining = check_exponential_backoff_cooldown(identifier)
     if in_backoff:
         return jsonify({
@@ -966,7 +1019,7 @@ def api_login():
             "backoff_seconds": backoff_remaining
         }), 429
 
-    # Step 4: Check CAPTCHA if required
+    # Step 3: Check CAPTCHA if required
     record = FAILED_ATTEMPTS.get(identifier, {})
     fail_count = record.get("count", 0)
 
@@ -996,8 +1049,11 @@ def api_login():
                 "backoff_seconds": backoff_sec
             }), 400
 
-    # Step 5: Check Password Match using ==
-    if USERS[username] == password:
+    # Step 4: Unified Username & Password Check (Prevent timing attacks & Username Enumeration)
+    user_exists = username in USERS
+    password_correct = user_exists and USERS[username] == password
+
+    if password_correct:
         reset_failed_attempts(identifier)
         token = generate_jwt_token(username)
         return jsonify({
@@ -1019,7 +1075,7 @@ def api_login():
             return jsonify({
                 "error": "Too Many Requests",
                 "status_code": 429,
-                "message": f"Incorrect password. Exceeded {MAX_FAILED_ATTEMPTS} failed attempts. Account '{username}' locked for {lock_sec} seconds.",
+                "message": f"Invalid username or password. Exceeded {MAX_FAILED_ATTEMPTS} failed attempts. Account locked for {lock_sec} seconds.",
                 "retry_after_seconds": lock_sec,
                 "backoff_seconds": backoff_sec
             }), 429
@@ -1027,7 +1083,7 @@ def api_login():
             return jsonify({
                 "error": "Unauthorized",
                 "status_code": 401,
-                "message": f"Incorrect password. ({attempts}/{MAX_FAILED_ATTEMPTS} failed attempts).",
+                "message": f"Invalid username or password. ({attempts}/{MAX_FAILED_ATTEMPTS} failed attempts).",
                 "failed_attempts": attempts,
                 "remaining_attempts": MAX_FAILED_ATTEMPTS - attempts,
                 "backoff_seconds": backoff_sec,
@@ -1069,6 +1125,83 @@ def api_protected():
         "message": f"Welcome to the protected API endpoint, {request.jwt_user}!",
         "authenticated_user": request.jwt_user,
         "server_timestamp": time.time()
+    }), 200
+
+
+# --- 7.5 TIMING SIDE-CHANNEL BENCHMARK ROUTE ---
+
+@app.route("/api/test-timing", methods=["POST"])
+def api_test_timing():
+    """
+    Timing Side-Channel Test Endpoint:
+    Measures and compares execution time & status code between:
+    1. Early Return Flow ('checkusername-return'): Returns 404 immediately if username does not exist.
+    2. Full Check Flow ('checkusername-checkpassword-return'): Executes lockout, backoff, password check, & failed attempt record.
+    """
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "nonexistent_user")).strip()
+    password = str(data.get("password", "wrong_password"))
+
+    # Benchmark 1: Flow A (Vulnerable: checkusername-return)
+    t0 = time.perf_counter()
+    if username not in USERS:
+        flow_a_status = 404
+        flow_a_msg = f"Username '{username}' does not exist (Early 404 Return)."
+    else:
+        identifier = get_account_identifier(username)
+        _ = check_brute_force_lockout(identifier)
+        _ = check_exponential_backoff_cooldown(identifier)
+        if USERS[username] == password:
+            flow_a_status = 200
+            flow_a_msg = "Login successful."
+        else:
+            _, _, _, _ = record_failed_attempt(identifier)
+            flow_a_status = 401
+            flow_a_msg = "Incorrect password (401 Return)."
+    t1 = time.perf_counter()
+    flow_a_time_ms = round((t1 - t0) * 1000, 4)
+
+    # Benchmark 2: Flow B (Secure: checkusername-checkpassword-return)
+    t2 = time.perf_counter()
+    identifier_b = get_account_identifier(username)
+    _ = check_brute_force_lockout(identifier_b)
+    _ = check_exponential_backoff_cooldown(identifier_b)
+    user_exists_b = username in USERS
+    pass_ok_b = user_exists_b and USERS[username] == password
+    if pass_ok_b:
+        flow_b_status = 200
+        flow_b_msg = "Login successful."
+    else:
+        _, _, _, _ = record_failed_attempt(identifier_b)
+        flow_b_status = 401
+        flow_b_msg = "Invalid username or password (Unified 401 Return)."
+    t3 = time.perf_counter()
+    flow_b_time_ms = round((t3 - t2) * 1000, 4)
+
+    delta_ms = round(abs(flow_b_time_ms - flow_a_time_ms), 4)
+
+    return jsonify({
+        "status": "success",
+        "username_tested": username,
+        "username_exists": username in USERS,
+        "flow_a_vulnerable": {
+            "name": "checkusername-return (Explicit 404/401)",
+            "status_code": flow_a_status,
+            "message": flow_a_msg,
+            "execution_time_ms": flow_a_time_ms
+        },
+        "flow_b_secure": {
+            "name": "checkusername-checkpassword-return (Secure Unified 401)",
+            "status_code": flow_b_status,
+            "message": flow_b_msg,
+            "execution_time_ms": flow_b_time_ms
+        },
+        "timing_difference_ms": delta_ms,
+        "analysis": (
+            f"Flow A (checkusername-return) responded with status {flow_a_status} in {flow_a_time_ms} ms. "
+            f"Flow B (checkusername-checkpassword-return) responded with status {flow_b_status} in {flow_b_time_ms} ms. "
+            f"Execution latency delta Δt: {delta_ms} ms."
+        )
     }), 200
 
 
